@@ -1,0 +1,24 @@
+# Node & build output
+node_modules/
+dist/
+coverage/
+.parcel-cache/
+
+# Environment / local config
+.env
+.env.*.local
+.DS_Store
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor artifacts
+.vscode/
+.idea/
+
+# Mac/Linux system files
+.Trash-*
+.AppleDouble
+._*
+Thumbs.db
