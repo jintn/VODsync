@@ -2,45 +2,55 @@
 
 Tools for turning Warcraft Logs data into VOD timestamps and an interactive review experience.
 
-## Web Companion App (Vite + React + Tailwind)
+## Web Companion App
 
-1. Install Node.js 18+.
-2. Copy `.env.example` to `.env` and fill in your Warcraft Logs **client credentials** (`WCL_CLIENT_ID` / `WCL_CLIENT_SECRET`). Create these under *Applications → Client Credentials* on warcraftlogs.com.
-3. Install dependencies:
+| Tech | Details |
+| ---- | ------- |
+| Framework | Vite + React + TypeScript |
+| Styling | Tailwind CSS |
+| Backend | Minimal Express proxy that handles OAuth + Warcraft Logs GraphQL |
 
+### Prerequisites
+- Node.js 18+
+- Warcraft Logs API application (Client ID/Secret)
+
+### Quick Start
+1. **Install deps**
    ```bash
    npm install
    ```
-
-4. Start the local API proxy (GraphQL + OAuth client credentials):
-
+2. **Configure env**
    ```bash
-   npm run server
+   cp .env.example .env
+   # fill WCL_CLIENT_ID / WCL_CLIENT_SECRET
    ```
-
-   This uses your credentials to obtain OAuth tokens and proxy the GraphQL v2 request.
-
-5. In a separate terminal, start the Vite dev server:
-
+3. **Run servers**
    ```bash
-   npm run dev
+   npm run server   # OAuth + GraphQL proxy
+   npm run dev      # Vite dev server
    ```
+4. Visit `http://localhost:5173`.
 
-6. Open the printed URL (defaults to http://localhost:5173).
+### Workflow in the UI
+1. **Report ID** – Paste the Warcraft Logs report code (`/reports/<ID>`).
+2. **Videos list** – Add one row per POV or recording:
+   - **Video URL** – YouTube (watch/live/shorts/youtu.be) or direct `.mp4/.webm`.
+   - **Label** – Optional name (e.g., “Tank POV”, “Healer”); class colors auto-detected when matching a character name in the log.
+   - **First Pull Timestamp** – The timestamp *inside that clip* where the report’s first pull appears (`HH:MM:SS`). Each clip can start at a different offset; the app stitches them into one continuous global clock.
+3. Click **Load Report** to fetch pulls and sync the videos.
 
-### Using the UI
+### What You Get
+- **Multi-POV video player** – Swap POVs at any time; the player computes the correct offset so you land on the identical fight moment regardless of clip start times.
+- **Boss timeline** – Every pull rendered as a tile (wipe or kill) with phase info, duration, and visual progress.
+- **Interactive timeline** – Jump around pulls, see phase markers, deaths, and bloodlust casts directly on the scrubber.
+- **Clipboard helper** – Copy formatted timestamps that match the CLI output.
+- **Live refresh** – Optional “Live mode” re-fetches the report every 45 seconds.
 
-- **Report ID**: The string in your Warcraft Logs URL (`/reports/<ID>`).
-- **First Pull Timestamp**: Where the first boss pull appears in your VOD (`HH:MM:SS`).
-- **Video URL**: A YouTube link (watch, live, shorts, youtu.be) or a direct `.mp4/.webm` URL.
-
-Hit **Load Report** and the page will:
-
-- Embed your VOD in a large player on the left (YouTube iframe or native `<video>` for direct files).
-- Group wipes under each boss and show every pull as a small square tile labeled “Wipe #” (or “Kill”) with duration and progress. Clicking a tile jumps the player to that pull.
-- Provide a **Copy timestamps** shortcut that mirrors the CLI’s output for YouTube descriptions.
-
-Long breaks are preserved because timestamps are derived from the absolute fight start times recorded in the log, not from list position.
+### Deploy / Build
+```bash
+npm run build   # production assets in dist/
+```
+Serve the `dist/` folder behind any static host (Vercel, Netlify, S3, etc.) and run the Express proxy wherever you keep your API credentials.
 
 ## CLI Timestamp Generator
 
