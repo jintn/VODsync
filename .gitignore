@@ -5,6 +5,7 @@ coverage/
 .parcel-cache/
 
 # Environment / local config
+.venv
 .env
 .env.*.local
 .DS_Store
