@@ -24,7 +24,6 @@ interface VideoFormEntry {
   url: string;
   firstPull: string;
   label: string;
-  offsetSeconds: number;
 }
 
 interface VideoOption {
@@ -32,6 +31,7 @@ interface VideoOption {
   source: VideoSource;
   firstPullSeconds: number;
   offsetSeconds: number;
+  manualOffsetSeconds: number;
   label: string;
   characterName: string | null;
 }
@@ -40,7 +40,6 @@ const emptyVideoEntry: VideoFormEntry = {
   url: "",
   firstPull: "00:00:00",
   label: "",
-  offsetSeconds: 0,
 };
 
 const createInitialForm = () => ({
@@ -60,7 +59,6 @@ function App() {
   const [fights, setFights] = useState<FightRow[]>([]);
   const [reportMeta, setReportMeta] = useState<ReportMeta | null>(null);
   const [videoOptions, setVideoOptions] = useState<VideoOption[]>([]);
-  const [videoManualOffsets, setVideoManualOffsets] = useState<number[]>([]);
   const [activeVideoIndex, setActiveVideoIndex] = useState(0);
   const [playerSeekRevision, setPlayerSeekRevision] = useState(0);
   const [playerStartSeconds, setPlayerStartSeconds] = useState(0);
@@ -73,19 +71,8 @@ function App() {
 
   const hasVideo = videoOptions.length > 0;
   const activeVideo = videoOptions[activeVideoIndex] ?? null;
-  const manualOffsetSeconds = videoManualOffsets[activeVideoIndex] ?? 0;
-  const getVideoOffsetSeconds = (index: number) => {
-    const base = videoOptions[index]?.offsetSeconds ?? 0;
-    const manual = videoManualOffsets[index] ?? 0;
-    return base - manual;
-  };
-
-  useEffect(() => {
-    setVideoManualOffsets((prev) => {
-      if (prev.length === videoOptions.length) return prev;
-      return videoOptions.map((_, idx) => prev[idx] ?? 0);
-    });
-  }, [videoOptions]);
+  const manualOffsetSeconds = videoOptions[activeVideoIndex]?.manualOffsetSeconds ?? 0;
+  const getVideoOffsetSeconds = (index: number) => videoOptions[index]?.offsetSeconds ?? 0;
 
   useEffect(() => {
     if (!activeVideo) {
@@ -196,24 +183,23 @@ function App() {
         return;
       }
 
-      const baseFirstPull = options[0].firstPullSeconds;
-
-      const rows = buildBossFightRows(report.fights ?? [], baseFirstPull);
+      const { options: normalizedOptions, base: normalizedBase } = normalizeVideoOptions(options);
+      const vodBase = normalizedBase ?? normalizedOptions[0]?.firstPullSeconds ?? 0;
+      const rows = buildBossFightRows(report.fights ?? [], vodBase);
       setFights(rows);
       setReportMeta({
         title: report.title,
         owner: report.owner,
         zone: report.zone,
       });
-      setVideoOptions(options);
-      setVideoManualOffsets(options.map(() => 0));
+      setVideoOptions(normalizedOptions);
       setActiveVideoIndex(0);
       setPlayerStartSeconds(0);
       setPlayerSeekRevision((rev) => rev + 1);
       setActorClassMap(buildActorClassMap(report.actors ?? []));
       setLiveMode(form.liveMode);
       setActiveReportId(trimmedId);
-      setVodOffsetSeconds(baseFirstPull);
+      setVodOffsetSeconds(vodBase);
       setStatus({ kind: "success", message: `Loaded ${rows.length} boss pulls.` });
       setPhase("review");
     } catch (error) {
@@ -270,7 +256,6 @@ function App() {
     setFights([]);
     setReportMeta(null);
     setVideoOptions([]);
-    setVideoManualOffsets([]);
     setActiveVideoIndex(0);
     setPlayerStartSeconds(0);
     setPlayerSeekRevision((rev) => rev + 1);
@@ -291,8 +276,20 @@ function App() {
       setStatus({ kind: "error", message: "Load a video before adjusting offset." });
       return;
     }
-    setVideoManualOffsets((prev) =>
-      prev.map((value, idx) => (idx === activeVideoIndex ? newOffset : value)),
+    const base = vodOffsetSeconds ?? 0;
+    setVideoOptions((prev) =>
+      prev.map((option, idx) => {
+        if (idx !== activeVideoIndex) {
+          return option;
+        }
+        const manual = newOffset;
+        const offsetSeconds = option.firstPullSeconds + manual - base;
+        return {
+          ...option,
+          manualOffsetSeconds: manual,
+          offsetSeconds,
+        };
+      }),
     );
     if (phase === "review") {
       handleJump(currentVideoTime);
@@ -539,26 +536,6 @@ function LandingHero({
                     onChange={(event) => updateVideoEntry(index, "label", event.target.value)}
                     className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950/30 px-3 py-2 text-base text-slate-100 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500"
                     placeholder="Main POV, Healer, etc."
-                  />
-                </label>
-                <label className="mt-3 block text-xs uppercase tracking-wide text-slate-400">
-                  First Pull Timestamp (HH:MM:SS)
-                  <input
-                    type="text"
-                    value={video.firstPull}
-                    onChange={(event) => updateVideoEntry(index, "firstPull", event.target.value)}
-                    className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950/30 px-3 py-2 text-base text-slate-100 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500"
-                    placeholder="00:00:00"
-                  />
-                </label>
-                <label className="mt-3 block text-xs uppercase tracking-wide text-slate-400">
-                  Offset Adjustment (seconds)
-                  <input
-                    type="number"
-                    value={video.offsetSeconds}
-                    onChange={(event) => updateVideoEntry(index, "offsetSeconds", event.target.value)}
-                    className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950/30 px-3 py-2 text-base text-slate-100 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500"
-                    placeholder="0"
                   />
                 </label>
                 {index > 0 && (
@@ -1147,7 +1124,6 @@ function buildVideoOptionsFromInputs(entries: VideoFormEntry[]): VideoOption[] {
       url: entry.url.trim(),
       firstPull: (entry.firstPull || "00:00:00").trim() || "00:00:00",
       label: (entry.label || "").trim(),
-      offsetSeconds: Number(entry.offsetSeconds) || 0,
     }))
     .filter((entry) => entry.url.length > 0);
   if (!trimmed.length) {
@@ -1186,9 +1162,28 @@ function buildVideoOptionsFromInputs(entries: VideoFormEntry[]): VideoOption[] {
     source: entry.source,
     firstPullSeconds: entry.originalFirstPullSeconds,
     offsetSeconds: entry.originalFirstPullSeconds - base,
+    manualOffsetSeconds: 0,
     label: entry.label,
     characterName: entry.characterName,
   }));
+}
+
+function normalizeVideoOptions(
+  options: VideoOption[],
+): { options: VideoOption[]; base: number | null } {
+  if (!options.length) {
+    return { options, base: null };
+  }
+  const adjusted = options.map(
+    (option) => option.firstPullSeconds + (option.manualOffsetSeconds ?? 0),
+  );
+  const minAdjusted = Math.min(...adjusted);
+  const normalized = options.map((option, index) => ({
+    ...option,
+    manualOffsetSeconds: option.manualOffsetSeconds ?? 0,
+    offsetSeconds: adjusted[index] - minAdjusted,
+  }));
+  return { options: normalized, base: minAdjusted };
 }
 
 function buildActorClassMap(actors: ActorInfo[]): Record<string, string> {
