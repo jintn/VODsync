@@ -927,7 +927,13 @@ function asNumber(value, fallback = 0) {
 
 export function createApp() {
   const app = express();
-  app.use(express.json());
+  const jsonParser = express.json();
+  app.use((req, res, next) => {
+    if (req.body !== undefined || req.method === "GET" || req.method === "HEAD") {
+      return next();
+    }
+    return jsonParser(req, res, next);
+  });
 
   app.post("/api/defensives", async (req, res) => {
     const reportId = (req.body?.reportId || "").trim();
