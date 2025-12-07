@@ -935,58 +935,132 @@ export function createApp() {
     return jsonParser(req, res, next);
   });
 
-  app.post("/api/defensives", async (req, res) => {
-    const reportId = (req.body?.reportId || "").trim();
-    if (!reportId) {
-      return res.status(400).json({ error: "reportId is required." });
-    }
-    if (!WCL_CLIENT_ID || !WCL_CLIENT_SECRET) {
-      return res.status(500).json({ error: "Server missing WCL OAuth credentials." });
-    }
-
-    try {
-      const data = await fetchDefensiveUsage(reportId);
-      res.json(data);
-    } catch (error) {
-      console.error("[logtime] /api/defensives error:", error);
-      res.status(500).json({ error: error.message || "Unexpected server error." });
-    }
-  });
-
-  app.get("/api/youtube/live-start", async (req, res) => {
-    const videoId = (req.query?.videoId || "").toString().trim();
-    if (!videoId) {
-      return res.status(400).json({ error: "videoId is required." });
-    }
-    if (!YOUTUBE_API_KEY) {
-      return res.status(500).json({ error: "Server missing YOUTUBE_API_KEY." });
-    }
-    try {
-      const data = await fetchYoutubeLiveStart(videoId);
-      res.json(data ?? { startEpochSeconds: null });
-    } catch (error) {
-      console.error("[logtime] /api/youtube/live-start error:", error);
-      res.status(500).json({ error: error.message || "Failed to load YouTube live metadata." });
-    }
-  });
-
-  app.post("/api/report", async (req, res) => {
-    const reportId = (req.body?.reportId || "").trim();
-    if (!reportId) {
-      return res.status(400).json({ error: "reportId is required." });
-    }
-    if (!WCL_CLIENT_ID || !WCL_CLIENT_SECRET) {
-      return res.status(500).json({ error: "Server missing WCL OAuth credentials." });
-    }
-
-    try {
-      const data = await fetchReport(reportId);
-      res.json(data);
-    } catch (error) {
-      console.error("[logtime] /api/report error:", error);
-      res.status(500).json({ error: error.message || "Unexpected server error." });
-    }
-  });
+  app.post("/api/defensives", handleDefensivesRequest);
+  app.get("/api/youtube/live-start", handleYoutubeLiveStartRequest);
+  app.post("/api/report", handleReportRequest);
 
   return app;
+}
+
+export async function handleDefensivesRequest(req, res) {
+  if (!enforceMethod(req, res, "POST")) {
+    return;
+  }
+  const reportId = (req.body?.reportId || "").trim();
+  if (!reportId) {
+    return sendJson(res, 400, { error: "reportId is required." });
+  }
+  if (!WCL_CLIENT_ID || !WCL_CLIENT_SECRET) {
+    return sendJson(res, 500, { error: "Server missing WCL OAuth credentials." });
+  }
+  try {
+    const data = await fetchDefensiveUsage(reportId);
+    return sendJson(res, 200, data);
+  } catch (error) {
+    console.error("[logtime] /api/defensives error:", error);
+    return sendJson(res, 500, { error: error.message || "Unexpected server error." });
+  }
+}
+
+export async function handleYoutubeLiveStartRequest(req, res) {
+  if (!enforceMethod(req, res, "GET")) {
+    return;
+  }
+  const rawVideoId = getQueryParam(req, "videoId");
+  const videoId = (rawVideoId || "").toString().trim();
+  if (!videoId) {
+    return sendJson(res, 400, { error: "videoId is required." });
+  }
+  if (!YOUTUBE_API_KEY) {
+    return sendJson(res, 500, { error: "Server missing YOUTUBE_API_KEY." });
+  }
+  try {
+    const data = await fetchYoutubeLiveStart(videoId);
+    return sendJson(res, 200, data ?? { startEpochSeconds: null });
+  } catch (error) {
+    console.error("[logtime] /api/youtube/live-start error:", error);
+    return sendJson(res, 500, { error: error.message || "Failed to load YouTube live metadata." });
+  }
+}
+
+export async function handleReportRequest(req, res) {
+  if (!enforceMethod(req, res, "POST")) {
+    return;
+  }
+  const reportId = (req.body?.reportId || "").trim();
+  if (!reportId) {
+    return sendJson(res, 400, { error: "reportId is required." });
+  }
+  if (!WCL_CLIENT_ID || !WCL_CLIENT_SECRET) {
+    return sendJson(res, 500, { error: "Server missing WCL OAuth credentials." });
+  }
+  try {
+    const data = await fetchReport(reportId);
+    return sendJson(res, 200, data);
+  } catch (error) {
+    console.error("[logtime] /api/report error:", error);
+    return sendJson(res, 500, { error: error.message || "Unexpected server error." });
+  }
+}
+
+function enforceMethod(req, res, allowed) {
+  const allowedMethods = Array.isArray(allowed)
+    ? allowed.map((method) => String(method || "").toUpperCase())
+    : [String(allowed || "").toUpperCase()];
+  const method = String(req?.method || "GET").toUpperCase();
+  if (allowedMethods.includes(method)) {
+    return true;
+  }
+  try {
+    if (typeof res?.setHeader === "function") {
+      res.setHeader("Allow", allowedMethods.join(", "));
+    }
+  } catch {
+    // ignore header errors in fallback environments
+  }
+  sendJson(res, 405, { error: "Method not allowed." });
+  return false;
+}
+
+function sendJson(res, status, payload) {
+  if (typeof res?.status === "function" && typeof res?.json === "function") {
+    return res.status(status).json(payload);
+  }
+  if (res) {
+    try {
+      res.statusCode = status;
+      if (typeof res.setHeader === "function") {
+        res.setHeader("Content-Type", "application/json");
+      }
+      if (typeof res.end === "function") {
+        res.end(JSON.stringify(payload));
+        return;
+      }
+    } catch (error) {
+      console.error("[logtime] Failed to send JSON response:", error);
+    }
+  }
+}
+
+function getQueryParam(req, key) {
+  const query = req?.query;
+  if (query && typeof query === "object") {
+    const value = query[key];
+    if (Array.isArray(value)) {
+      return value[0];
+    }
+    if (value != null) {
+      return value;
+    }
+  }
+  const urlValue = typeof req?.url === "string" ? req.url : null;
+  if (urlValue) {
+    try {
+      const parsed = new URL(urlValue, "http://localhost");
+      return parsed.searchParams.get(key);
+    } catch {
+      // ignore malformed URLs
+    }
+  }
+  return null;
 }
