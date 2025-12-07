@@ -35,6 +35,20 @@ let abilityIconCache = null;
 const itemIconCache = new Map();
 const youtubeLiveStartCache = new Map();
 
+const rawAllowedOrigins =
+  process.env.LOGTIME_ALLOWED_ORIGINS ??
+  process.env.logtime_allowed_origins ??
+  process.env.ALLOWED_ORIGINS ??
+  process.env.allowed_origins ??
+  "";
+const allowedOriginSet = new Set(
+  rawAllowedOrigins
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0),
+);
+const allowAllOrigins = allowedOriginSet.size === 0;
+
 async function getAccessToken() {
   const now = Date.now();
   if (tokenCache.accessToken && tokenCache.expiresAt > now + 10_000) {
@@ -941,6 +955,12 @@ function asNumber(value, fallback = 0) {
 
 export function createApp() {
   const app = express();
+  app.use((req, res, next) => {
+    if (!ensureCors(req, res)) {
+      return;
+    }
+    next();
+  });
   const jsonParser = express.json();
   app.use((req, res, next) => {
     if (req.body !== undefined || req.method === "GET" || req.method === "HEAD") {
@@ -957,6 +977,9 @@ export function createApp() {
 }
 
 export async function handleDefensivesRequest(req, res) {
+  if (!ensureCors(req, res)) {
+    return;
+  }
   if (!enforceMethod(req, res, "POST")) {
     return;
   }
@@ -977,6 +1000,9 @@ export async function handleDefensivesRequest(req, res) {
 }
 
 export async function handleYoutubeLiveStartRequest(req, res) {
+  if (!ensureCors(req, res)) {
+    return;
+  }
   if (!enforceMethod(req, res, "GET")) {
     return;
   }
@@ -998,6 +1024,9 @@ export async function handleYoutubeLiveStartRequest(req, res) {
 }
 
 export async function handleReportRequest(req, res) {
+  if (!ensureCors(req, res)) {
+    return;
+  }
   if (!enforceMethod(req, res, "POST")) {
     return;
   }
@@ -1053,6 +1082,83 @@ function sendJson(res, status, payload) {
     } catch (error) {
       console.error("[logtime] Failed to send JSON response:", error);
     }
+  }
+}
+
+function ensureCors(req, res) {
+  if (!req || req.__logtimeCorsHandled) {
+    return true;
+  }
+  const origin = getRequestOrigin(req);
+  if (!isOriginAllowed(origin)) {
+    console.warn(`[logtime] Blocked CORS origin: ${origin}`);
+    sendJson(res, 403, { error: "Origin not allowed." });
+    return false;
+  }
+  setCorsHeaders(res, origin);
+  const method = String(req.method || "GET").toUpperCase();
+  if (method === "OPTIONS") {
+    endCorsPreflight(res);
+    req.__logtimeCorsHandled = true;
+    return false;
+  }
+  req.__logtimeCorsHandled = true;
+  return true;
+}
+
+function getRequestOrigin(req) {
+  const origin = req?.headers?.origin ?? req?.headers?.Origin ?? "";
+  return typeof origin === "string" ? origin.trim() : "";
+}
+
+function isOriginAllowed(origin) {
+  if (!origin) {
+    return true;
+  }
+  if (allowAllOrigins) {
+    return true;
+  }
+  return allowedOriginSet.has(origin);
+}
+
+function setCorsHeaders(res, origin) {
+  if (!res || typeof res.setHeader !== "function") {
+    return;
+  }
+  const allowValue = origin || (allowAllOrigins ? "*" : "");
+  if (allowValue) {
+    res.setHeader("Access-Control-Allow-Origin", allowValue);
+  }
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type,Authorization,X-Logtime-Token",
+  );
+  res.setHeader("Access-Control-Max-Age", "86400");
+}
+
+function endCorsPreflight(res) {
+  try {
+    if (typeof res?.status === "function") {
+      res.status(204);
+      if (typeof res.end === "function") {
+        res.end();
+        return;
+      }
+      if (typeof res.send === "function") {
+        res.send();
+        return;
+      }
+    } else if (res) {
+      res.statusCode = 204;
+      if (typeof res.end === "function") {
+        res.end();
+        return;
+      }
+    }
+  } catch (error) {
+    console.error("[logtime] Failed to send CORS preflight response:", error);
   }
 }
 
