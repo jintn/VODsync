@@ -1,40 +1,30 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import VideoPlayer, { type VideoPlayerHandle } from "./components/VideoPlayer";
+import DefensiveUsagePage from "./components/DefensiveUsagePage";
 import {
   buildBossFightRows,
   fetchReportFights,
   formatDuration,
+  formatHhmmss,
   parseHhmmss,
   type FightRow,
   type ReportMeta,
   type ActorInfo,
+  type RawFight,
 } from "./lib/logtime";
-import { detectVideoSource, type VideoSource } from "./lib/video";
+import { detectVideoSource, fetchYoutubeLiveStart, type VideoSource } from "./lib/video";
+import { getClassColor } from "./lib/classColors";
 
 type StatusState =
   | { kind: "idle"; message: "" }
   | { kind: "info" | "success" | "error"; message: string };
 
-const CLASS_COLORS: Record<string, string> = {
-  DeathKnight: "#C41F3B",
-  DemonHunter: "#A330C9",
-  Druid: "#FF7C0A",
-  Evoker: "#33937F",
-  Hunter: "#AAD372",
-  Mage: "#3FC7EB",
-  Monk: "#00FF98",
-  Paladin: "#F48CBA",
-  Priest: "#FFFFFF",
-  Rogue: "#FFF468",
-  Shaman: "#0070DD",
-  Warlock: "#8788EE",
-  Warrior: "#C69B6D",
-};
 
 interface VideoFormEntry {
   url: string;
   firstPull: string;
   label: string;
+  offsetSeconds: number;
 }
 
 interface VideoOption {
@@ -50,6 +40,7 @@ const emptyVideoEntry: VideoFormEntry = {
   url: "",
   firstPull: "00:00:00",
   label: "",
+  offsetSeconds: 0,
 };
 
 const createInitialForm = () => ({
@@ -62,12 +53,14 @@ type FormState = ReturnType<typeof createInitialForm>;
 
 function App() {
   const [phase, setPhase] = useState<"landing" | "review">("landing");
+  const [activeTool, setActiveTool] = useState<"vod" | "defensives">("vod");
   const [form, setForm] = useState<FormState>(createInitialForm);
   const [status, setStatus] = useState<StatusState>({ kind: "idle", message: "" });
   const [loading, setLoading] = useState(false);
   const [fights, setFights] = useState<FightRow[]>([]);
   const [reportMeta, setReportMeta] = useState<ReportMeta | null>(null);
   const [videoOptions, setVideoOptions] = useState<VideoOption[]>([]);
+  const [videoManualOffsets, setVideoManualOffsets] = useState<number[]>([]);
   const [activeVideoIndex, setActiveVideoIndex] = useState(0);
   const [playerSeekRevision, setPlayerSeekRevision] = useState(0);
   const [playerStartSeconds, setPlayerStartSeconds] = useState(0);
@@ -80,6 +73,19 @@ function App() {
 
   const hasVideo = videoOptions.length > 0;
   const activeVideo = videoOptions[activeVideoIndex] ?? null;
+  const manualOffsetSeconds = videoManualOffsets[activeVideoIndex] ?? 0;
+  const getVideoOffsetSeconds = (index: number) => {
+    const base = videoOptions[index]?.offsetSeconds ?? 0;
+    const manual = videoManualOffsets[index] ?? 0;
+    return base - manual;
+  };
+
+  useEffect(() => {
+    setVideoManualOffsets((prev) => {
+      if (prev.length === videoOptions.length) return prev;
+      return videoOptions.map((_, idx) => prev[idx] ?? 0);
+    });
+  }, [videoOptions]);
 
   useEffect(() => {
     if (!activeVideo) {
@@ -88,11 +94,11 @@ function App() {
     }
     const interval = setInterval(() => {
       const localTime = playerRef.current?.getCurrentTime?.() ?? 0;
-      const globalTime = localTime - activeVideo.offsetSeconds;
+      const globalTime = localTime - getVideoOffsetSeconds(activeVideoIndex);
       setCurrentVideoTime(Math.max(0, globalTime));
     }, 500);
     return () => clearInterval(interval);
-  }, [activeVideo]);
+  }, [activeVideo, activeVideoIndex]);
 
   useEffect(() => {
     if (!liveMode || phase !== "review" || !activeReportId || vodOffsetSeconds == null) {
@@ -157,32 +163,41 @@ function App() {
     setStatus({ kind: "info", message: "Loading report…" });
     setLoading(true);
 
-    let options: VideoOption[] = [];
-    try {
-      options = buildVideoOptionsFromInputs(form.videos);
-    } catch (error) {
-      setStatus({
-        kind: "error",
-        message: error instanceof Error ? error.message : "Invalid video settings.",
-      });
-      setLoading(false);
-      return;
-    }
-
-    if (!options.length) {
-      setStatus({
-        kind: "error",
-        message: "Add at least one video with a first pull timestamp.",
-      });
-      setLoading(false);
-      return;
-    }
-
-    const baseFirstPull = options[0].firstPullSeconds;
-
     try {
       const trimmedId = form.reportId.trim();
       const report = await fetchReportFights(trimmedId);
+      const { videos: autoVideos, changed: autoChanged } = await autoFillYoutubeFirstPulls(
+        form.videos,
+        report.fights ?? [],
+        report.startTime ?? null,
+      );
+      if (autoChanged) {
+        setForm((prev) => ({ ...prev, videos: autoVideos }));
+      }
+
+      let options: VideoOption[] = [];
+      try {
+        options = buildVideoOptionsFromInputs(autoVideos);
+      } catch (error) {
+        setStatus({
+          kind: "error",
+          message: error instanceof Error ? error.message : "Invalid video settings.",
+        });
+        setLoading(false);
+        return;
+      }
+
+      if (!options.length) {
+        setStatus({
+          kind: "error",
+          message: "Add at least one video with a first pull timestamp.",
+        });
+        setLoading(false);
+        return;
+      }
+
+      const baseFirstPull = options[0].firstPullSeconds;
+
       const rows = buildBossFightRows(report.fights ?? [], baseFirstPull);
       setFights(rows);
       setReportMeta({
@@ -191,6 +206,7 @@ function App() {
         zone: report.zone,
       });
       setVideoOptions(options);
+      setVideoManualOffsets(options.map(() => 0));
       setActiveVideoIndex(0);
       setPlayerStartSeconds(0);
       setPlayerSeekRevision((rev) => rev + 1);
@@ -220,12 +236,12 @@ function App() {
     }
     let targetIndex = activeVideoIndex;
     let targetVideo = videoOptions[targetIndex] ?? videoOptions[0];
-    let relativeSeconds = seconds + targetVideo.offsetSeconds;
+    let relativeSeconds = seconds + getVideoOffsetSeconds(targetIndex);
 
     if (relativeSeconds < -0.25 || Number.isNaN(relativeSeconds)) {
       targetIndex = 0;
       targetVideo = videoOptions[targetIndex];
-      relativeSeconds = seconds + targetVideo.offsetSeconds;
+      relativeSeconds = seconds + getVideoOffsetSeconds(targetIndex);
     }
 
     relativeSeconds = Math.max(0, relativeSeconds);
@@ -243,7 +259,7 @@ function App() {
   const handleVideoSelect = (index: number) => {
     if (!videoOptions[index]) return;
     setActiveVideoIndex(index);
-    const relativeSeconds = Math.max(0, currentVideoTime + videoOptions[index].offsetSeconds);
+    const relativeSeconds = Math.max(0, currentVideoTime + getVideoOffsetSeconds(index));
     setPlayerStartSeconds(relativeSeconds);
     setPlayerSeekRevision((rev) => rev + 1);
   };
@@ -254,6 +270,7 @@ function App() {
     setFights([]);
     setReportMeta(null);
     setVideoOptions([]);
+    setVideoManualOffsets([]);
     setActiveVideoIndex(0);
     setPlayerStartSeconds(0);
     setPlayerSeekRevision((rev) => rev + 1);
@@ -263,6 +280,23 @@ function App() {
     setStatus({ kind: "idle", message: "" });
     setLoading(false);
     setCurrentVideoTime(0);
+  };
+
+  const handleManualOffsetChange = (newOffset: number) => {
+    if (!Number.isFinite(newOffset)) {
+      setStatus({ kind: "error", message: "Offset must be a number." });
+      return;
+    }
+    if (!videoOptions.length) {
+      setStatus({ kind: "error", message: "Load a video before adjusting offset." });
+      return;
+    }
+    setVideoManualOffsets((prev) =>
+      prev.map((value, idx) => (idx === activeVideoIndex ? newOffset : value)),
+    );
+    if (phase === "review") {
+      handleJump(currentVideoTime);
+    }
   };
 
   const statusClass =
@@ -275,93 +309,136 @@ function App() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-100">
       <nav className="border-b border-white/5 bg-slate-950/70">
-        <div className="mx-auto flex w-full items-center justify-between gap-6 px-8 py-4 lg:px-12">
-          <button
-            type="button"
-            onClick={() => setPhase("landing")}
-            className="text-lg font-semibold tracking-[0.18em] text-amber-200 transition hover:text-amber-100"
-          >
-            VODSync
-          </button>
-          {phase === "review" ? (
-            <div className="flex flex-1 flex-wrap items-center justify-end gap-3 text-xs text-slate-300">
-              <div className="flex flex-col gap-0.5 text-right">
-                {reportSubtitle && <span className="text-sm text-slate-200">{reportSubtitle}</span>}
-                {status.kind === "success" && status.message ? (
-                  <span className="text-xs text-emerald-400">{status.message}</span>
-                ) : null}
-              </div>
-              {!!timestampList.length && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    navigator.clipboard
-                      .writeText(timestampList.join("\n"))
-                      .then(() =>
-                        setStatus({
-                          kind: "success",
-                          message: "Copied timestamps to clipboard.",
-                        }),
-                      )
-                      .catch(() =>
-                        setStatus({
-                          kind: "error",
-                          message: "Clipboard copy failed. Select manually instead.",
-                        }),
-                      );
-                  }}
-                  className="rounded-full border border-slate-700 px-5 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-900"
-                >
-                  Copy timestamps
-                </button>
-              )}
+        <div className="mx-auto flex w-full flex-wrap items-center gap-4 px-8 py-4 lg:px-12">
+          <div className="flex flex-wrap items-center gap-4">
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTool("vod");
+                setPhase("landing");
+              }}
+              className="text-lg font-semibold tracking-[0.18em] text-amber-200 transition hover:text-amber-100"
+            >
+              VODSync
+            </button>
+            <div className="flex items-center gap-2 text-[0.65rem] font-semibold uppercase tracking-[0.25em] text-slate-500">
               <button
                 type="button"
-                onClick={handleReset}
-                className="rounded-full border border-slate-700 px-5 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
+                onClick={() => setActiveTool("vod")}
+                className={`rounded-full border px-3 py-1 transition ${
+                  activeTool === "vod"
+                    ? "border-amber-200 bg-amber-200/10 text-amber-100"
+                    : "border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300"
+                }`}
               >
-                New report
+                VOD REVIEW
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTool("defensives")}
+                className={`rounded-full border px-3 py-1 transition ${
+                  activeTool === "defensives"
+                    ? "border-cyan-300 bg-cyan-300/10 text-cyan-100"
+                    : "border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300"
+                }`}
+              >
+                DEFENSIVES
               </button>
             </div>
-          ) : (
-            <span className="text-xs uppercase tracking-[0.18em] text-slate-500">
-              Warcraft Logs Companion
-            </span>
-          )}
+          </div>
+          <div className="flex flex-1 flex-wrap items-center justify-end gap-3 text-xs text-slate-300">
+            {activeTool === "vod" ? (
+              phase === "review" ? (
+                <>
+                  <div className="flex flex-col gap-0.5 text-right">
+                    {reportSubtitle && <span className="text-sm text-slate-200">{reportSubtitle}</span>}
+                    {status.kind === "success" && status.message ? (
+                      <span className="text-xs text-emerald-400">{status.message}</span>
+                    ) : null}
+                  </div>
+                  {!!timestampList.length && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard
+                          .writeText(timestampList.join("\n"))
+                          .then(() =>
+                            setStatus({
+                              kind: "success",
+                              message: "Copied timestamps to clipboard.",
+                            }),
+                          )
+                          .catch(() =>
+                            setStatus({
+                              kind: "error",
+                              message: "Clipboard copy failed. Select manually instead.",
+                            }),
+                          );
+                      }}
+                      className="rounded-full border border-slate-700 px-5 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-900"
+                    >
+                      Copy timestamps
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleReset}
+                    className="rounded-full border border-slate-700 px-5 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
+                  >
+                    New report
+                  </button>
+                </>
+              ) : (
+                <span className="text-xs uppercase tracking-[0.18em] text-slate-500">
+                  Warcraft Logs Companion
+                </span>
+              )
+            ) : (
+              <span className="text-xs uppercase tracking-[0.18em] text-slate-500">
+                Defensive Usage Dashboard
+              </span>
+            )}
+          </div>
         </div>
       </nav>
 
       <main className="w-full px-8 py-10 lg:px-12">
-        {phase === "landing" ? (
-          <LandingHero
-            form={form}
-            setForm={setForm}
-            loading={loading}
-            onSubmit={handleSubmit}
-            statusClass={statusClass}
-            statusMessage={status.message}
-          />
+        {activeTool === "vod" ? (
+          phase === "landing" ? (
+            <LandingHero
+              form={form}
+              setForm={setForm}
+              loading={loading}
+              onSubmit={handleSubmit}
+              statusClass={statusClass}
+              statusMessage={status.message}
+            />
+          ) : (
+            <ReviewWorkspace
+              playerRef={playerRef}
+              videoSource={activeVideo?.source ?? null}
+              fights={fights}
+              groupedFights={groupedFights}
+              reportSubtitle={reportSubtitle}
+              timestampList={timestampList}
+              onJump={handleJump}
+              currentVideoTime={currentVideoTime}
+              setStatus={setStatus}
+              statusClass={statusClass}
+              statusMessage={status.message}
+              hasVideo={hasVideo}
+              videoOptions={videoOptions}
+              activeVideoIndex={activeVideoIndex}
+              onVideoSelect={handleVideoSelect}
+              playerStartSeconds={playerStartSeconds}
+              playerSeekRevision={playerSeekRevision}
+              actorClassMap={actorClassMap}
+              manualOffsetSeconds={manualOffsetSeconds}
+              onManualOffsetChange={handleManualOffsetChange}
+            />
+          )
         ) : (
-          <ReviewWorkspace
-            playerRef={playerRef}
-            videoSource={activeVideo?.source ?? null}
-            fights={fights}
-            groupedFights={groupedFights}
-            reportSubtitle={reportSubtitle}
-            timestampList={timestampList}
-            onJump={handleJump}
-            currentVideoTime={currentVideoTime}
-            setStatus={setStatus}
-            statusClass={statusClass}
-            statusMessage={status.message}
-            hasVideo={hasVideo}
-            videoOptions={videoOptions}
-            activeVideoIndex={activeVideoIndex}
-            onVideoSelect={handleVideoSelect}
-            playerStartSeconds={playerStartSeconds}
-            playerSeekRevision={playerSeekRevision}
-            actorClassMap={actorClassMap}
-          />
+          <DefensiveUsagePage />
         )}
       </main>
     </div>
@@ -474,6 +551,16 @@ function LandingHero({
                     placeholder="00:00:00"
                   />
                 </label>
+                <label className="mt-3 block text-xs uppercase tracking-wide text-slate-400">
+                  Offset Adjustment (seconds)
+                  <input
+                    type="number"
+                    value={video.offsetSeconds}
+                    onChange={(event) => updateVideoEntry(index, "offsetSeconds", event.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-950/30 px-3 py-2 text-base text-slate-100 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500"
+                    placeholder="0"
+                  />
+                </label>
                 {index > 0 && (
                   <button
                     type="button"
@@ -534,6 +621,8 @@ interface ReviewWorkspaceProps {
   playerStartSeconds: number;
   playerSeekRevision: number;
   actorClassMap: Record<string, string>;
+  manualOffsetSeconds: number;
+  onManualOffsetChange: (offset: number) => void;
 }
 
 function ReviewWorkspace({
@@ -555,6 +644,8 @@ function ReviewWorkspace({
   playerStartSeconds,
   playerSeekRevision,
   actorClassMap,
+  manualOffsetSeconds,
+  onManualOffsetChange,
 }: ReviewWorkspaceProps) {
   const [selectedFight, setSelectedFight] = useState<FightRow | null>(null);
   const [isScrubbing, setIsScrubbing] = useState(false);
@@ -856,33 +947,44 @@ function ReviewWorkspace({
             seekRevision={playerSeekRevision}
             className="w-full"
           />
-          {videoOptions.length > 1 && (
-            <div className="mt-4 flex flex-wrap gap-3 text-sm text-slate-300">
-              {videoOptions.map((option, index) => {
-                const classColor = getOptionClassColor(option, actorClassMap);
-                const textClass = classColor
-                  ? ""
-                  : index === activeVideoIndex
-                    ? "text-indigo-200"
-                    : "text-slate-400 hover:text-indigo-200";
-                return (
-                  <button
-                    key={`${option.url}-${index}`}
-                    type="button"
-                    onClick={() => onVideoSelect(index)}
-                    className={`rounded-full border px-4 py-2 font-semibold transition ${
-                      index === activeVideoIndex
-                        ? "border-indigo-400 bg-indigo-500/20"
-                        : "border-slate-700 hover:border-indigo-400"
-                    } ${textClass}`}
-                    style={classColor ? { color: classColor } : undefined}
-                  >
-                    {option.label}
-                  </button>
-                );
-              })}
-            </div>
-          )}
+          <div className="mt-4 flex flex-wrap items-center gap-3 text-sm text-slate-300">
+            {videoOptions.length > 1 && (
+              <div className="flex flex-wrap gap-3">
+                {videoOptions.map((option, index) => {
+                  const classColor = getOptionClassColor(option, actorClassMap);
+                  const textClass = classColor
+                    ? ""
+                    : index === activeVideoIndex
+                      ? "text-indigo-200"
+                      : "text-slate-400 hover:text-indigo-200";
+                  return (
+                    <button
+                      key={`${option.url}-${index}`}
+                      type="button"
+                      onClick={() => onVideoSelect(index)}
+                      className={`rounded-full border px-4 py-2 font-semibold transition ${
+                        index === activeVideoIndex
+                          ? "border-indigo-400 bg-indigo-500/20"
+                          : "border-slate-700 hover:border-indigo-400"
+                      } ${textClass}`}
+                      style={classColor ? { color: classColor } : undefined}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <label className="ml-auto flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+              Video offset (s)
+              <input
+                type="number"
+                value={manualOffsetSeconds}
+                onChange={(event) => onManualOffsetChange(Number(event.target.value) || 0)}
+                className="w-24 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-100 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
+              />
+            </label>
+          </div>
         </div>
         <section className="space-y-5">
           {groupedFights.length === 0 ? (
@@ -982,6 +1084,62 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+async function autoFillYoutubeFirstPulls(
+  videos: VideoFormEntry[],
+  fights: RawFight[],
+  reportStartTime: number | null | undefined,
+): Promise<{ videos: VideoFormEntry[]; changed: boolean }> {
+  if (!Array.isArray(videos) || !videos.length || typeof reportStartTime !== "number") {
+    return { videos, changed: false };
+  }
+  const bossFights = fights.filter((fight) => (fight.encounterID ?? 0) > 0);
+  if (!bossFights.length) {
+    return { videos, changed: false };
+  }
+  bossFights.sort((a, b) => a.startTime - b.startTime);
+  const firstFight = bossFights[0];
+  if (!firstFight || typeof firstFight.startTime !== "number") {
+    return { videos, changed: false };
+  }
+  const firstPullAbsoluteSeconds = Math.round((reportStartTime + firstFight.startTime) / 1000);
+  if (!Number.isFinite(firstPullAbsoluteSeconds)) {
+    return { videos, changed: false };
+  }
+  const updated = await Promise.all(
+    videos.map(async (video) => {
+      const shouldAuto = !video.firstPull || video.firstPull.trim() === "" || video.firstPull.trim() === "00:00:00";
+      if (!shouldAuto) {
+        return video;
+      }
+      const source = detectVideoSource(video.url);
+      if (!source || source.kind !== "youtube") {
+        return video;
+      }
+      try {
+        const metadata = await fetchYoutubeLiveStart(source.videoId);
+        const startEpochSeconds = metadata?.startEpochSeconds;
+        if (!startEpochSeconds || !Number.isFinite(startEpochSeconds)) {
+          return video;
+        }
+        const offsetSeconds = firstPullAbsoluteSeconds - startEpochSeconds;
+        if (!Number.isFinite(offsetSeconds) || offsetSeconds < 0) {
+          return video;
+        }
+        const formatted = formatHhmmss(offsetSeconds);
+        if (formatted === video.firstPull) {
+          return video;
+        }
+        return { ...video, firstPull: formatted };
+      } catch (error) {
+        console.warn("[logtime] YouTube auto-fill failed", error);
+        return video;
+      }
+    }),
+  );
+  const changed = updated.some((video, index) => video.firstPull !== videos[index].firstPull);
+  return { videos: updated, changed };
+}
+
 function buildVideoOptionsFromInputs(entries: VideoFormEntry[]): VideoOption[] {
   const trimmed = entries
     .map((entry, index) => ({
@@ -989,6 +1147,7 @@ function buildVideoOptionsFromInputs(entries: VideoFormEntry[]): VideoOption[] {
       url: entry.url.trim(),
       firstPull: (entry.firstPull || "00:00:00").trim() || "00:00:00",
       label: (entry.label || "").trim(),
+      offsetSeconds: Number(entry.offsetSeconds) || 0,
     }))
     .filter((entry) => entry.url.length > 0);
   if (!trimmed.length) {
@@ -1015,16 +1174,20 @@ function buildVideoOptionsFromInputs(entries: VideoFormEntry[]): VideoOption[] {
     return {
       url: entry.url,
       source,
-      firstPullSeconds,
+      originalFirstPullSeconds: firstPullSeconds,
       label: displayLabel,
       characterName: entry.label ? entry.label.trim().toLowerCase() : null,
     };
   });
-  parsed.sort((a, b) => a.firstPullSeconds - b.firstPullSeconds);
-  const base = parsed[0]?.firstPullSeconds ?? 0;
+  parsed.sort((a, b) => a.originalFirstPullSeconds - b.originalFirstPullSeconds);
+  const base = parsed[0]?.originalFirstPullSeconds ?? 0;
   return parsed.map((entry) => ({
-    ...entry,
-    offsetSeconds: entry.firstPullSeconds - base,
+    url: entry.url,
+    source: entry.source,
+    firstPullSeconds: entry.originalFirstPullSeconds,
+    offsetSeconds: entry.originalFirstPullSeconds - base,
+    label: entry.label,
+    characterName: entry.characterName,
   }));
 }
 
@@ -1047,5 +1210,5 @@ function getOptionClassColor(
   if (!key) return null;
   const className = classMap[key];
   if (!className) return null;
-  return CLASS_COLORS[className] ?? null;
+  return getClassColor(className);
 }

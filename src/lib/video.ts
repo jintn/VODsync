@@ -2,6 +2,16 @@ export type VideoSource =
   | { kind: "youtube"; videoId: string }
   | { kind: "html5"; url: string };
 
+export async function fetchYoutubeLiveStart(videoId: string): Promise<{ startEpochSeconds: number | null } | null> {
+  if (!videoId) return null;
+  const response = await fetch(`/api/youtube/live-start?videoId=${encodeURIComponent(videoId)}`);
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`YouTube metadata error (${response.status} ${response.statusText}): ${text || "No details"}`);
+  }
+  return (await response.json()) as { startEpochSeconds: number | null };
+}
+
 export function detectVideoSource(rawUrl: string): VideoSource | null {
   const trimmed = rawUrl.trim();
   if (!trimmed) return null;
@@ -22,7 +32,7 @@ export function detectVideoSource(rawUrl: string): VideoSource | null {
   return null;
 }
 
-function extractYoutubeId(url: URL): string | null {
+export function extractYoutubeId(url: URL): string | null {
   const host = url.hostname.toLowerCase();
   const path = url.pathname.replace(/\/+$/, "");
   if (host.includes("youtu.be")) {

@@ -40,6 +40,7 @@ export interface ReportPayload {
   owner?: string;
   zone?: { id: number; name?: string } | number;
   actors?: ActorInfo[];
+  startTime?: number | null;
 }
 
 export interface FightRow {
@@ -126,7 +127,7 @@ export async function fetchReportFights(reportIdOrUrl: string): Promise<ReportPa
   return (await response.json()) as ReportPayload;
 }
 
-function extractReportId(input: string): string {
+export function extractReportId(input: string): string {
   const trimmed = input.trim();
   const urlMatch = trimmed.match(/reports\/([A-Za-z0-9]{16})/);
   if (urlMatch) {
