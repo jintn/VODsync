@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import VideoPlayer, { type VideoPlayerHandle } from "./components/VideoPlayer";
 import DefensiveUsagePage from "./components/DefensiveUsagePage";
 import {
@@ -68,6 +68,8 @@ function App() {
   const [vodOffsetSeconds, setVodOffsetSeconds] = useState<number | null>(null);
   const playerRef = useRef<VideoPlayerHandle>(null);
   const [currentVideoTime, setCurrentVideoTime] = useState(0);
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const lastPlayerTimeRef = useRef(0);
 
   const hasVideo = videoOptions.length > 0;
   const activeVideo = videoOptions[activeVideoIndex] ?? null;
@@ -77,12 +79,17 @@ function App() {
   useEffect(() => {
     if (!activeVideo) {
       setCurrentVideoTime(0);
+      setIsVideoPlaying(false);
+      lastPlayerTimeRef.current = 0;
       return;
     }
     const interval = setInterval(() => {
       const localTime = playerRef.current?.getCurrentTime?.() ?? 0;
       const globalTime = localTime - getVideoOffsetSeconds(activeVideoIndex);
       setCurrentVideoTime(Math.max(0, globalTime));
+      const delta = Math.abs(localTime - lastPlayerTimeRef.current);
+      setIsVideoPlaying(delta > 0.05);
+      lastPlayerTimeRef.current = localTime;
     }, 500);
     return () => clearInterval(interval);
   }, [activeVideo, activeVideoIndex]);
@@ -144,6 +151,9 @@ function App() {
     });
     return Array.from(map.entries());
   }, [fights]);
+  const handlePlaybackToggle = useCallback(() => {
+    setIsVideoPlaying((prev) => !prev);
+  }, []);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -221,12 +231,10 @@ function App() {
       return;
     }
     let targetIndex = activeVideoIndex;
-    let targetVideo = videoOptions[targetIndex] ?? videoOptions[0];
     let relativeSeconds = seconds + getVideoOffsetSeconds(targetIndex);
 
     if (relativeSeconds < -0.25 || Number.isNaN(relativeSeconds)) {
       targetIndex = 0;
-      targetVideo = videoOptions[targetIndex];
       relativeSeconds = seconds + getVideoOffsetSeconds(targetIndex);
     }
 
@@ -432,6 +440,8 @@ function App() {
               actorClassMap={actorClassMap}
               manualOffsetSeconds={manualOffsetSeconds}
               onManualOffsetChange={handleManualOffsetChange}
+              isVideoPlaying={isVideoPlaying}
+              onPlaybackToggle={handlePlaybackToggle}
             />
           )
         ) : (
@@ -600,6 +610,8 @@ interface ReviewWorkspaceProps {
   actorClassMap: Record<string, string>;
   manualOffsetSeconds: number;
   onManualOffsetChange: (offset: number) => void;
+  isVideoPlaying: boolean;
+  onPlaybackToggle: () => void;
 }
 
 function ReviewWorkspace({
@@ -623,6 +635,8 @@ function ReviewWorkspace({
   actorClassMap,
   manualOffsetSeconds,
   onManualOffsetChange,
+  isVideoPlaying,
+  onPlaybackToggle,
 }: ReviewWorkspaceProps) {
   const [selectedFight, setSelectedFight] = useState<FightRow | null>(null);
   const [isScrubbing, setIsScrubbing] = useState(false);
@@ -681,7 +695,12 @@ function ReviewWorkspace({
   }, [selectedFight]);
 
   const phaseMarkers = useMemo(() => selectedFight?.phaseMarkers ?? [], [selectedFight]);
-  const bloodlustMarkers = useMemo(() => selectedFight?.bloodlusts ?? [], [selectedFight]);
+  const bloodlustMarkers = useMemo(() => {
+    if (!selectedFight || !Array.isArray(selectedFight.bloodlusts)) {
+      return [];
+    }
+    return selectedFight.bloodlusts.length ? [selectedFight.bloodlusts[0]] : [];
+  }, [selectedFight]);
 
   const getVideoSecondsFromPointer = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!timelineRef.current || !selectedFight) {
@@ -751,170 +770,12 @@ function ReviewWorkspace({
     } else if (event.key === " " || event.key === "Spacebar") {
       event.preventDefault();
       playerRef.current?.togglePlayback?.();
+      onPlaybackToggle();
     }
   };
 
   return (
     <div className="space-y-6">
-      {selectedFight && (
-        <section className="3xl border border-black/5 bg-slate-950/80 p-5 shadow-2xl shadow-black/40">
-          <div className="space-y-3 text-sm text-slate-300">
-            <div
-              ref={timelineRef}
-              className={`relative h-8 w-full border border-slate-800 bg-slate-950/80 shadow-inner shadow-black/40 transition ${hasVideo ? "cursor-ew-resize" : "cursor-not-allowed opacity-70"}`}
-              role="slider"
-              aria-label="Selected fight timeline"
-              aria-valuemin={0}
-              aria-valuemax={selectedFightDuration}
-              aria-valuenow={relativeCurrentSeconds}
-              aria-disabled={!hasVideo}
-              onPointerDown={handleTimelinePointerDown}
-              onPointerMove={handleTimelinePointerMove}
-              onPointerUp={handleTimelinePointerUp}
-              onPointerLeave={handleTimelinePointerLeave}
-              onPointerCancel={handleTimelinePointerLeave}
-              tabIndex={hasVideo ? 0 : -1}
-              onKeyDown={handleTimelineKeyDown}
-            >
-              <div className="relative h-full w-full overflow-hidden">
-                <div className="pointer-events-none absolute inset-0">
-                  <div
-                    className="absolute inset-y-0 left-0 bg-gradient-to-r from-emerald-400/25 via-emerald-300/15 to-transparent"
-                    style={{ width: `${clampedPercent}%` }}
-                  ></div>
-                  <div className="absolute inset-y-0 left-0 border-l border-emerald-300/60" style={{ width: `${clampedPercent}%` }}></div>
-                </div>
-                <div className="relative z-10 flex h-full w-full border-x border-white/5">
-                  {selectedFight.phaseSegments.map((segment, idx) => {
-                    const segDuration = Math.max(0, segment.endSeconds - segment.startSeconds);
-                    const widthPercent =
-                      selectedFight.durationSeconds > 0
-                        ? (segDuration / selectedFight.durationSeconds) * 100
-                        : 0;
-                    const label = segment.label || `P${idx + 1}`;
-                    const cls = segment.isIntermission ? "bg-fuchsia-500/70" : "bg-sky-500/70";
-                    return (
-                      <div
-                        key={`${label}-${idx}`}
-                        className={cls}
-                        style={{ width: `${Math.max(widthPercent, 4)}%` }}
-                        title={label}
-                      ></div>
-                    );
-                  })}
-                </div>
-              </div>
-              <div className="pointer-events-none absolute inset-0">
-                {phaseMarkers.map((marker, idx) => {
-                  const leftPercent =
-                    selectedFight.durationSeconds > 0
-                      ? (marker.offsetSeconds / selectedFight.durationSeconds) * 100
-                      : 0;
-                  const markerClass = marker.isIntermission
-                    ? "bg-fuchsia-600/90 border-fuchsia-300/60"
-                    : "bg-sky-600/90 border-sky-300/60";
-                  return (
-                    <div
-                      key={`${marker.label}-${idx}-${marker.offsetSeconds}`}
-                      className="absolute -top-8 flex -translate-x-1/2 flex-col items-center text-[0.6rem] font-semibold uppercase tracking-tight text-white drop-shadow"
-                      style={{ left: `${leftPercent}%` }}
-                    >
-                      <div className={`rounded border px-1.5 py-0.5 ${markerClass}`}>{marker.label}</div>
-                      <span className="mt-1 h-10 w-0.5 bg-white/70"></span>
-                    </div>
-                  );
-                })}
-              </div>
-              {bloodlustMarkers.map((marker, idx) => (
-                <div
-                  key={`${selectedFight.pull}-lust-${idx}-${marker.offsetSeconds}`}
-                  className="absolute -top-12 z-10 -translate-x-1/2"
-                  style={{
-                    left:
-                      selectedFight.durationSeconds > 0
-                        ? `${(marker.offsetSeconds / selectedFight.durationSeconds) * 100}%`
-                        : "0%",
-                  }}
-                >
-                  <div className="group flex flex-col items-center text-[0.55rem] font-semibold uppercase tracking-tight text-white">
-                    <div className="rounded border border-sky-300 bg-sky-500/90 px-1.5 py-0.5 text-slate-950 shadow">
-                      BL
-                    </div>
-                    <span className="mt-1 h-6 w-0.5 bg-sky-300"></span>
-                    <div className="pointer-events-none mt-1 whitespace-nowrap rounded border border-slate-800 bg-slate-900/95 px-2 py-1 text-[0.55rem] text-slate-100 opacity-0 shadow-lg shadow-black/40 transition group-hover:opacity-100">
-                      <p className="font-semibold text-sky-200">{marker.ability}</p>
-                      <p className="text-slate-300">{marker.caster}</p>
-                      <p className="text-slate-400">{marker.offsetText}</p>
-                    </div>
-                  </div>
-                </div>
-              ))}
-              {groupedDeathMarkers.map((group, idx) => (
-                <div
-                  key={`${selectedFight.pull}-death-group-${idx}`}
-                  className="absolute z-20 top-0 -translate-x-1/2"
-                  style={{ left: `${(group.offsetSeconds / selectedFight.durationSeconds) * 100}%` }}
-                >
-                  <div className="flex h-full flex-col items-center">
-                    <div className="group -translate-y-full pb-2 text-xs text-rose-200">
-                      <div className="relative text-lg leading-none">
-                        <span role="img" aria-label="death">
-                        💀
-                        </span>
-                        {group.markers.length > 1 && (
-                          <span className="absolute -right-2 -top-2 rounded-full bg-rose-600 px-1.5 py-0.5 text-[0.55rem] font-bold text-white shadow">
-                            {group.markers.length}
-                          </span>
-                        )}
-                        <div className="pointer-events-none absolute -top-10 left-1/2 -translate-x-1/2 whitespace-nowrap rounded border border-slate-800 bg-slate-900/95 px-2 py-1 text-[0.6rem] font-semibold text-slate-100 opacity-0 shadow-lg shadow-black/40 transition group-hover:opacity-100">
-                          <p className="text-rose-200">
-                            {group.markers.length > 1
-                              ? `${group.markers.length} deaths @ ${group.offsetText}`
-                              : `${group.markers[0].player} @ ${group.offsetText}`}
-                          </p>
-                          {group.markers.length > 1 && (
-                            <ul className="mt-1 space-y-0.5 text-left text-[0.55rem] text-slate-200">
-                              {group.markers.map((marker, markerIdx) => (
-                                <li key={`${marker.player}-${markerIdx}`}>
-                                  {marker.player}
-                                </li>
-                              ))}
-                            </ul>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                    <span className="h-full w-0.5 bg-gradient-to-b from-rose-200 to-rose-500"></span>
-                  </div>
-                </div>
-              ))}
-              <div className="pointer-events-none absolute inset-0 z-30">
-                <span
-                  className="absolute inset-y-0 w-0.5 bg-gradient-to-b from-emerald-100 to-emerald-400"
-                  style={{
-                    left: `${clampedPercent}%`,
-                    transform: "translateX(-50%)",
-                  }}
-                ></span>
-                <div
-                  className="absolute top-full flex flex-col items-center text-xs text-emerald-100"
-                  style={{
-                    left: `${clampedPercent}%`,
-                    transform: "translate(-50%, 0)",
-                    marginTop: "0.5rem",
-                  }}
-                >
-                  <div className="mb-1 rounded-sm border border-emerald-300/60 bg-emerald-400/90 px-2 py-0.5 text-[0.65rem] font-semibold text-slate-950 shadow-lg shadow-emerald-500/30">
-                    {formatDuration(relativeCurrentSeconds)}
-                  </div>
-                  <span className="h-3 w-3 rotate-45 rounded-sm border border-slate-900 bg-emerald-300 shadow shadow-emerald-500/40"></span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
-
       <div className="grid gap-1 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <div className="border border-white/5 bg-slate-950/80 p-4 shadow-2xl shadow-black/40">
           <VideoPlayer
@@ -924,6 +785,239 @@ function ReviewWorkspace({
             seekRevision={playerSeekRevision}
             className="w-full"
           />
+          {selectedFight && (
+            <div className="mt-6">
+              <div
+                ref={timelineRef}
+                className={`relative w-full border border-slate-800 bg-slate-950/90 pt-12 pb-12 shadow-inner shadow-black/40 transition ${hasVideo ? "cursor-ew-resize" : "cursor-not-allowed opacity-70"}`}
+                role="slider"
+                aria-label="Selected fight timeline"
+                aria-valuemin={0}
+                aria-valuemax={selectedFightDuration}
+                aria-valuenow={relativeCurrentSeconds}
+                aria-disabled={!hasVideo}
+                onPointerDown={handleTimelinePointerDown}
+                onPointerMove={handleTimelinePointerMove}
+                onPointerUp={handleTimelinePointerUp}
+                onPointerLeave={handleTimelinePointerLeave}
+                onPointerCancel={handleTimelinePointerLeave}
+                tabIndex={hasVideo ? 0 : -1}
+                onKeyDown={handleTimelineKeyDown}
+              >
+                <div className="relative h-8 w-full overflow-visible rounded-sm bg-slate-900">
+                  <div className="relative z-10 h-full w-full border-x border-white/5 bg-slate-900/60">
+                    <div className="absolute inset-0 flex h-full w-full">
+                      {selectedFight.phaseSegments.map((segment, idx) => {
+                        const segDuration = Math.max(0, segment.endSeconds - segment.startSeconds);
+                        const widthPercent =
+                          selectedFight.durationSeconds > 0
+                            ? (segDuration / selectedFight.durationSeconds) * 100
+                            : 0;
+                        const baseClass = segment.isIntermission ? "bg-slate-700/70" : "bg-slate-800/70";
+                        const label = segment.label || `P${idx + 1}`;
+                        return (
+                          <div
+                            key={`${label}-base-${idx}`}
+                            className={baseClass}
+                            style={{ width: `${Math.max(widthPercent, 0)}%` }}
+                          ></div>
+                        );
+                      })}
+                    </div>
+                    <div className="absolute inset-0">
+                      {selectedFight.phaseSegments.map((segment, idx) => {
+                        const segDuration = Math.max(0, segment.endSeconds - segment.startSeconds);
+                        const widthPercent =
+                          selectedFight.durationSeconds > 0
+                            ? (segDuration / selectedFight.durationSeconds) * 100
+                            : 0;
+                        const startPercent =
+                          selectedFight.durationSeconds > 0
+                            ? (segment.startSeconds / selectedFight.durationSeconds) * 100
+                            : 0;
+                        const filledWidth = Math.min(
+                          widthPercent,
+                          Math.max(clampedPercent - startPercent, 0),
+                        );
+                        if (filledWidth <= 0) {
+                          return null;
+                        }
+                        const cls = segment.isIntermission ? "bg-fuchsia-500/70" : "bg-sky-500/70";
+                        const label = segment.label || `P${idx + 1}`;
+                        return (
+                          <div
+                            key={`${label}-fill-${idx}`}
+                            className={`absolute inset-y-0 ${cls}`}
+                            style={{
+                              left: `${startPercent}%`,
+                              width: `${filledWidth}%`,
+                            }}
+                          ></div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="pointer-events-none absolute inset-0 z-20">
+                    {selectedFight.phaseSegments.map((segment, idx) => {
+                      if (idx === 0) return null;
+                      const startPercent =
+                        selectedFight.durationSeconds > 0
+                          ? (segment.startSeconds / selectedFight.durationSeconds) * 100
+                          : 0;
+                      return (
+                        <div
+                          key={`divider-${idx}`}
+                          className="absolute inset-y-0 w-0.5 bg-white/40"
+                          style={{ left: `${startPercent}%`, transform: "translateX(-50%)" }}
+                        ></div>
+                      );
+                    })}
+                    {selectedFight.phaseSegments.map((segment, idx) => {
+                      const segDuration = Math.max(0, segment.endSeconds - segment.startSeconds);
+                      const widthPercent =
+                        selectedFight.durationSeconds > 0
+                          ? (segDuration / selectedFight.durationSeconds) * 100
+                          : 0;
+                      const startPercent =
+                        selectedFight.durationSeconds > 0
+                          ? (segment.startSeconds / selectedFight.durationSeconds) * 100
+                          : 0;
+                      const label = segment.label || `P${idx + 1}`;
+                      const textClass = segment.isIntermission ? "bg-fuchsia-800/80" : "bg-sky-800/80";
+                      return (
+                        <div
+                          key={`label-${label}-${idx}`}
+                          className="absolute top-0 flex h-full items-center justify-center text-[0.65rem] font-semibold uppercase tracking-[0.1em] text-white drop-shadow"
+                          style={{
+                            left: `${startPercent}%`,
+                            width: `${Math.max(widthPercent, 4)}%`,
+                          }}
+                        >
+                          <span className={`rounded-sm px-1.5 py-0.5 bg-black/30 ${textClass}`}>
+                            {label}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="pointer-events-none absolute inset-0 z-30">
+                    <span
+                      className="absolute inset-y-0 w-0.5 bg-white/80"
+                      style={{
+                        left: `${clampedPercent}%`,
+                        transform: "translateX(-50%)",
+                      }}
+                    ></span>
+                  </div>
+                  <div
+                    className="pointer-events-none absolute inset-x-0 z-40"
+                    style={{ bottom: "100%", height: "3rem" }}
+                  >
+                    {bloodlustMarkers.map((marker, idx) => (
+                      <div
+                        key={`${selectedFight.pull}-lust-inline-${idx}-${marker.offsetSeconds}`}
+                        className="absolute bottom-0 flex h-full -translate-x-1/2 flex-col items-center justify-end"
+                        style={{
+                          left:
+                            selectedFight.durationSeconds > 0
+                              ? `${(marker.offsetSeconds / selectedFight.durationSeconds) * 100}%`
+                              : "0%",
+                        }}
+                      >
+                        <div className="group pointer-events-auto text-[0.55rem] text-white">
+                          <div className="relative flex h-7 w-7 items-center justify-center rounded-full border border-sky-300 bg-slate-900/90 shadow shadow-sky-500/40">
+                            <img
+                              src="https://wow.zamimg.com/images/wow/icons/large/spell_nature_bloodlust.jpg"
+                              alt="Bloodlust"
+                              className="h-6 w-6 rounded-full"
+                              loading="lazy"
+                            />
+                            <div className="pointer-events-none absolute -top-12 left-1/2 -translate-x-1/2 whitespace-nowrap rounded border border-slate-800 bg-slate-900/95 px-2 py-1 text-[0.55rem] font-semibold text-slate-100 opacity-0 shadow-lg shadow-black/40 transition group-hover:opacity-100">
+                              <p className="font-semibold text-sky-200">{marker.ability}</p>
+                              <p className="text-slate-300">{marker.caster}</p>
+                              <p className="text-slate-400">{marker.offsetText}</p>
+                            </div>
+                          </div>
+                        </div>
+                        <span className="mt-1 h-3 w-0.5 bg-white/80"></span>
+                      </div>
+                    ))}
+                  </div>
+                  <div
+                    className="pointer-events-none absolute inset-x-0 z-30"
+                    style={{ bottom: "100%", height: "3rem" }}
+                  >
+                    {groupedDeathMarkers.map((group, idx) => (
+                      <div
+                        key={`${selectedFight.pull}-death-inline-${idx}`}
+                        className="absolute bottom-0 flex h-full -translate-x-1/2 flex-col items-center justify-end"
+                        style={{
+                          left:
+                            selectedFight.durationSeconds > 0
+                              ? `${(group.offsetSeconds / selectedFight.durationSeconds) * 100}%`
+                              : "0%",
+                        }}
+                      >
+                        <div className="group pointer-events-auto text-xs text-rose-200">
+                          <div className="relative text-lg leading-none">
+                            <span role="img" aria-label="death">
+                              💀
+                            </span>
+                            {group.markers.length > 1 && (
+                              <span className="absolute -right-2 -top-2 rounded-full bg-rose-600 px-1.5 py-0.5 text-[0.55rem] font-bold text-white shadow">
+                                {group.markers.length}
+                              </span>
+                            )}
+                          </div>
+                          <div className="pointer-events-none absolute -top-12 left-1/2 w-max -translate-x-1/2 whitespace-nowrap rounded border border-slate-800 bg-slate-900/95 px-2 py-1 text-[0.6rem] font-semibold text-slate-100 opacity-0 shadow-lg shadow-black/40 transition group-hover:opacity-100">
+                            <p className="text-rose-200">
+                              {group.markers.length > 1
+                                ? `${group.markers.length} deaths @ ${group.offsetText}`
+                                : `${group.markers[0].player} @ ${group.offsetText}`}
+                            </p>
+                            {group.markers.length > 1 && (
+                              <ul className="mt-1 space-y-0.5 text-left text-[0.55rem] text-slate-200">
+                                {group.markers.map((marker, markerIdx) => (
+                                  <li key={`${marker.player}-${markerIdx}`}>{marker.player}</li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        </div>
+                        <span className="mt-1 h-3 w-0.5 bg-white/80"></span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="mt-3 flex items-center gap-4 text-sm text-slate-200">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!hasVideo) return;
+                    playerRef.current?.togglePlayback?.();
+                    onPlaybackToggle();
+                  }}
+                  className="rounded-full border border-slate-600 px-4 py-1 text-xs font-semibold uppercase tracking-wide transition hover:border-indigo-400 hover:text-indigo-200 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={!hasVideo}
+                >
+                  {isVideoPlaying ? "Pause" : "Play"}
+                </button>
+                <span className="font-mono text-xs text-slate-400">
+                  {formatDuration(relativeCurrentSeconds)} / {formatDuration(selectedFightDuration)}
+                </span>
+                <label className="ml-auto flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
+                  Video offset (s)
+                  <input
+                    type="number"
+                    value={manualOffsetSeconds}
+                    onChange={(event) => onManualOffsetChange(Number(event.target.value) || 0)}
+                    className="w-24 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-100 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
+                  />
+                </label>
+              </div>
+            </div>
+          )}
           <div className="mt-4 flex flex-wrap items-center gap-3 text-sm text-slate-300">
             {videoOptions.length > 1 && (
               <div className="flex flex-wrap gap-3">
@@ -952,15 +1046,6 @@ function ReviewWorkspace({
                 })}
               </div>
             )}
-            <label className="ml-auto flex items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
-              Video offset (s)
-              <input
-                type="number"
-                value={manualOffsetSeconds}
-                onChange={(event) => onManualOffsetChange(Number(event.target.value) || 0)}
-                className="w-24 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-100 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400"
-              />
-            </label>
           </div>
         </div>
         <section className="space-y-5">

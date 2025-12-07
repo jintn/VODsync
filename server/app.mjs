@@ -145,7 +145,7 @@ const DEATH_EVENTS_QUERY = `
   }
 `;
 
-const BLOODLUST_ABILITY_IDS = [2825, 32182, 80353, 90355, 178207, 204361, 264667];
+const BLOODLUST_ABILITY_IDS = [2825, 32182, 80353, 90355, 178207, 204361, 264667, 390386];
 const BLOODLUST_FILTER = `ability.id IN (${BLOODLUST_ABILITY_IDS.join(", ")})`;
 
 const BLOODLUST_EVENTS_QUERY = `
@@ -292,13 +292,21 @@ async function fetchBloodlustEvents(reportId, token, fightIDs, actorMap) {
     const actor = sourceId != null ? actorMap.get(sourceId) : null;
     const sourceName = event?.source?.name || actor?.name || event?.source?.guid || "Unknown";
     const abilityName = event?.ability?.name || "Bloodlust";
+    const abilityId = getNumericId(
+      event?.abilityGameID ??
+        event?.ability?.id ??
+        event?.ability?.abilityGameID ??
+        event?.ability?.guid ??
+        event?.abilityID ??
+        event?.ability?.ability,
+    );
     if (!byFight.has(fightId)) {
       byFight.set(fightId, []);
     }
     byFight.get(fightId).push({
       timestamp: event.timestamp,
       source: { name: sourceName },
-      ability: { name: abilityName },
+      ability: { name: abilityName, id: abilityId ?? null },
     });
   }
   return byFight;

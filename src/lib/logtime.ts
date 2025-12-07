@@ -31,7 +31,7 @@ interface GraphQLDeathEvent {
 interface GraphQLBloodlustEvent {
   timestamp: number;
   source?: { name?: string };
-  ability?: { name?: string };
+  ability?: { name?: string; id?: number | null };
 }
 
 export interface ReportPayload {
@@ -94,6 +94,8 @@ export interface DeathMarker {
 export interface BloodlustMarker {
   caster: string;
   ability: string;
+  abilityId: number | null;
+  abilityIcon: string | null;
   offsetSeconds: number;
   offsetText: string;
 }
@@ -110,6 +112,27 @@ export interface ActorInfo {
   type?: string | null;
   subType?: string | null;
 }
+
+const BLOODLUST_ICON_ID_MAP: Record<number, string> = {
+  2825: "https://wow.zamimg.com/images/wow/icons/large/spell_nature_bloodlust.jpg",
+  32182: "https://wow.zamimg.com/images/wow/icons/large/ability_shaman_heroism.jpg",
+  80353: "https://wow.zamimg.com/images/wow/icons/large/spell_arcane_timewarp.jpg",
+  90355: "https://wow.zamimg.com/images/wow/icons/large/spell_shadow_lifedrain.jpg",
+  178207: "https://wow.zamimg.com/images/wow/icons/large/inv_misc_drum_05.jpg",
+  204361: "https://wow.zamimg.com/images/wow/icons/large/inv_misc_drum_05.jpg",
+  264667: "https://wow.zamimg.com/images/wow/icons/large/ability_hunter_bestialdiscipline.jpg",
+  390386: "https://wow.zamimg.com/images/wow/icons/large/ability_evoker_furyoftheaspects.jpg",
+};
+
+const BLOODLUST_ICON_NAME_MAP: Record<string, string> = {
+  bloodlust: "https://wow.zamimg.com/images/wow/icons/large/spell_nature_bloodlust.jpg",
+  heroism: "https://wow.zamimg.com/images/wow/icons/large/ability_shaman_heroism.jpg",
+  "time warp": "https://wow.zamimg.com/images/wow/icons/large/spell_arcane_timewarp.jpg",
+  "ancient hysteria": "https://wow.zamimg.com/images/wow/icons/large/spell_shadow_lifedrain.jpg",
+  "primal rage": "https://wow.zamimg.com/images/wow/icons/large/ability_hunter_bestialdiscipline.jpg",
+  "drums of rage": "https://wow.zamimg.com/images/wow/icons/large/inv_misc_drum_05.jpg",
+  "fury of the aspects": "https://wow.zamimg.com/images/wow/icons/large/ability_evoker_furyoftheaspects.jpg",
+};
 
 export async function fetchReportFights(reportIdOrUrl: string): Promise<ReportPayload> {
   const reportId = extractReportId(reportIdOrUrl);
@@ -461,13 +484,26 @@ function buildBloodlustMarkers(fight: RawFight, durationSeconds: number): Bloodl
       const offsetSeconds = Math.max(0, Math.min(durationSeconds, offsetMs / 1000));
       const caster = event?.source?.name || "Unknown";
       const ability = event?.ability?.name || "Bloodlust";
+      const abilityId = getNumber(event?.ability?.id);
+      const abilityIcon = getBloodlustIcon(abilityId ?? null, ability);
       return {
         caster,
         ability,
+        abilityId: abilityId ?? null,
+        abilityIcon,
         offsetSeconds,
         offsetText: formatDuration(offsetSeconds),
       };
     })
     .filter((marker): marker is BloodlustMarker => Boolean(marker))
     .sort((a, b) => a.offsetSeconds - b.offsetSeconds);
+}
+
+function getBloodlustIcon(abilityId: number | null, name: string | null | undefined): string | null {
+  if (abilityId != null && BLOODLUST_ICON_ID_MAP[abilityId]) {
+    return BLOODLUST_ICON_ID_MAP[abilityId];
+  }
+  if (!name) return null;
+  const key = name.trim().toLowerCase();
+  return BLOODLUST_ICON_NAME_MAP[key] ?? null;
 }
