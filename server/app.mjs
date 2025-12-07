@@ -791,7 +791,11 @@ async function fetchYoutubeLiveStart(videoId) {
     throw new Error("Server missing YOUTUBE_API_KEY for YouTube metadata.");
   }
   if (youtubeLiveStartCache.has(videoId)) {
-    return youtubeLiveStartCache.get(videoId);
+    const cached = youtubeLiveStartCache.get(videoId);
+    if (cached?.startEpochSeconds != null) {
+      return cached;
+    }
+    youtubeLiveStartCache.delete(videoId);
   }
   const apiUrl = new URL("https://www.googleapis.com/youtube/v3/videos");
   apiUrl.searchParams.set("id", videoId);
@@ -813,7 +817,9 @@ async function fetchYoutubeLiveStart(videoId) {
     scheduledStartTime: scheduledStartTime ?? null,
     startEpochSeconds: epochSeconds,
   };
-  youtubeLiveStartCache.set(videoId, result);
+  if (epochSeconds != null) {
+    youtubeLiveStartCache.set(videoId, result);
+  }
   return result;
 }
 
