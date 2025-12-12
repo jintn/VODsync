@@ -36,6 +36,20 @@ interface VideoOption {
   characterName: string | null;
 }
 
+interface SharedSessionPayload {
+  version: 1;
+  reportId: string;
+  liveMode: boolean;
+  videos: SharedSessionVideo[];
+}
+
+interface SharedSessionVideo {
+  url: string;
+  firstPull: string;
+  label: string;
+  manualOffsetSeconds?: number;
+}
+
 const emptyVideoEntry: VideoFormEntry = {
   url: "",
   firstPull: "00:00:00",
@@ -49,6 +63,14 @@ const createInitialForm = () => ({
 });
 
 type FormState = ReturnType<typeof createInitialForm>;
+
+interface LoadReviewParams {
+  reportId: string;
+  videos: VideoFormEntry[];
+  liveMode: boolean;
+  skipAutoFill?: boolean;
+  manualOffsets?: number[];
+}
 
 function App() {
   const [phase, setPhase] = useState<"landing" | "review">("landing");
@@ -70,6 +92,40 @@ function App() {
   const [currentVideoTime, setCurrentVideoTime] = useState(0);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const lastPlayerTimeRef = useRef(0);
+  const sharedSessionBootRef = useRef(false);
+  const shareSessionPayload = useMemo<SharedSessionPayload | null>(() => {
+    if (phase !== "review" || !activeReportId || !videoOptions.length) {
+      return null;
+    }
+    return {
+      version: 1,
+      reportId: activeReportId,
+      liveMode,
+      videos: videoOptions.map((option) => ({
+        url: option.url,
+        firstPull: formatHhmmss(option.firstPullSeconds),
+        label: option.label,
+        manualOffsetSeconds: option.manualOffsetSeconds ?? 0,
+      })),
+    };
+  }, [activeReportId, liveMode, phase, videoOptions]);
+  const shareSessionToken = useMemo(() => {
+    if (!shareSessionPayload) {
+      return null;
+    }
+    try {
+      return encodeSharedSessionPayload(shareSessionPayload);
+    } catch (error) {
+      console.warn("[logtime] Failed to encode share session payload", error);
+      return null;
+    }
+  }, [shareSessionPayload]);
+  const shareSessionUrl = useMemo(() => {
+    if (!shareSessionToken) {
+      return null;
+    }
+    return buildShareableSessionUrl(shareSessionToken);
+  }, [shareSessionToken]);
 
   const hasVideo = videoOptions.length > 0;
   const activeVideo = videoOptions[activeVideoIndex] ?? null;
@@ -119,6 +175,7 @@ function App() {
     }, 45000);
     return () => clearInterval(interval);
   }, [liveMode, phase, activeReportId, vodOffsetSeconds]);
+
   const reportSubtitle = useMemo(() => {
     if (!reportMeta) return "";
     const parts: string[] = [];
@@ -155,72 +212,157 @@ function App() {
     setIsVideoPlaying((prev) => !prev);
   }, []);
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setStatus({ kind: "info", message: "Loading report…" });
-    setLoading(true);
-
-    try {
-      const trimmedId = form.reportId.trim();
-      const report = await fetchReportFights(trimmedId);
-      const { videos: autoVideos, changed: autoChanged } = await autoFillYoutubeFirstPulls(
-        form.videos,
-        report.fights ?? [],
-        report.startTime ?? null,
-      );
-      if (autoChanged) {
-        setForm((prev) => ({ ...prev, videos: autoVideos }));
+  const loadReviewSession = useCallback(
+    async ({ reportId, videos, liveMode, skipAutoFill = false, manualOffsets }: LoadReviewParams) => {
+      const trimmedId = reportId.trim();
+      if (!trimmedId) {
+        setStatus({ kind: "error", message: "Report ID is required." });
+        setLoading(false);
+        return;
       }
+      setStatus({ kind: "info", message: "Loading report…" });
+      setLoading(true);
 
-      let options: VideoOption[] = [];
       try {
-        options = buildVideoOptionsFromInputs(autoVideos);
+        const report = await fetchReportFights(trimmedId);
+        let workingVideos = videos;
+        if (!skipAutoFill) {
+          const { videos: autoVideos, changed: autoChanged } = await autoFillYoutubeFirstPulls(
+            workingVideos,
+            report.fights ?? [],
+            report.startTime ?? null,
+          );
+          if (autoChanged) {
+            workingVideos = autoVideos;
+            setForm((prev) => ({ ...prev, videos: autoVideos }));
+          }
+        }
+
+        let options = buildVideoOptionsFromInputs(workingVideos);
+        if (!options.length) {
+          setStatus({
+            kind: "error",
+            message: "Add at least one video with a first pull timestamp.",
+          });
+          return;
+        }
+
+        if (manualOffsets?.length) {
+          options = options.map((option, index) => ({
+            ...option,
+            manualOffsetSeconds: sanitizeManualOffset(manualOffsets[index]),
+          }));
+        }
+
+        const { options: normalizedOptions, base: normalizedBase } = normalizeVideoOptions(options);
+        const vodBase = normalizedBase ?? normalizedOptions[0]?.firstPullSeconds ?? 0;
+        const rows = buildBossFightRows(report.fights ?? [], vodBase);
+        setFights(rows);
+        setReportMeta({
+          title: report.title,
+          owner: report.owner,
+          zone: report.zone,
+        });
+        setVideoOptions(normalizedOptions);
+        setActiveVideoIndex(0);
+        setPlayerStartSeconds(0);
+        setPlayerSeekRevision((rev) => rev + 1);
+        setActorClassMap(buildActorClassMap(report.actors ?? []));
+        setLiveMode(liveMode);
+        setActiveReportId(trimmedId);
+        setVodOffsetSeconds(vodBase);
+        setStatus({ kind: "success", message: `Loaded ${rows.length} boss pulls.` });
+        setPhase("review");
       } catch (error) {
         setStatus({
           kind: "error",
-          message: error instanceof Error ? error.message : "Invalid video settings.",
+          message: error instanceof Error ? error.message : "Failed to load report.",
         });
+      } finally {
         setLoading(false);
-        return;
       }
+    },
+    [
+      setActiveReportId,
+      setActiveVideoIndex,
+      setActorClassMap,
+      setFights,
+      setForm,
+      setLiveMode,
+      setLoading,
+      setPhase,
+      setPlayerSeekRevision,
+      setPlayerStartSeconds,
+      setReportMeta,
+      setStatus,
+      setVideoOptions,
+      setVodOffsetSeconds,
+    ],
+  );
 
-      if (!options.length) {
-        setStatus({
-          kind: "error",
-          message: "Add at least one video with a first pull timestamp.",
-        });
-        setLoading(false);
-        return;
-      }
-
-      const { options: normalizedOptions, base: normalizedBase } = normalizeVideoOptions(options);
-      const vodBase = normalizedBase ?? normalizedOptions[0]?.firstPullSeconds ?? 0;
-      const rows = buildBossFightRows(report.fights ?? [], vodBase);
-      setFights(rows);
-      setReportMeta({
-        title: report.title,
-        owner: report.owner,
-        zone: report.zone,
-      });
-      setVideoOptions(normalizedOptions);
-      setActiveVideoIndex(0);
-      setPlayerStartSeconds(0);
-      setPlayerSeekRevision((rev) => rev + 1);
-      setActorClassMap(buildActorClassMap(report.actors ?? []));
-      setLiveMode(form.liveMode);
-      setActiveReportId(trimmedId);
-      setVodOffsetSeconds(vodBase);
-      setStatus({ kind: "success", message: `Loaded ${rows.length} boss pulls.` });
-      setPhase("review");
-    } catch (error) {
-      setStatus({
-        kind: "error",
-        message: error instanceof Error ? error.message : "Failed to load report.",
-      });
-    } finally {
-      setLoading(false);
-    }
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    await loadReviewSession({
+      reportId: form.reportId,
+      videos: form.videos,
+      liveMode: form.liveMode,
+    });
   };
+
+  useEffect(() => {
+    if (sharedSessionBootRef.current || typeof window === "undefined") {
+      return;
+    }
+    sharedSessionBootRef.current = true;
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("session");
+    if (!token) {
+      return;
+    }
+    const payload = decodeSharedSessionPayload(token);
+    if (!payload || payload.version !== 1 || !payload.reportId || !Array.isArray(payload.videos) || !payload.videos.length) {
+      setStatus({ kind: "error", message: "Shared session link is invalid or incomplete." });
+      return;
+    }
+    const sharedVideos = payload.videos.map((video) => ({
+      url: video?.url ?? "",
+      firstPull: video?.firstPull ?? "00:00:00",
+      label: video?.label ?? "",
+    }));
+    const normalizedVideos = sharedVideos.length ? sharedVideos : [{ ...emptyVideoEntry }];
+    setForm({
+      reportId: payload.reportId,
+      videos: normalizedVideos,
+      liveMode: !!payload.liveMode,
+    });
+    void loadReviewSession({
+      reportId: payload.reportId,
+      videos: normalizedVideos,
+      liveMode: !!payload.liveMode,
+      skipAutoFill: true,
+      manualOffsets: payload.videos.map((video) => sanitizeManualOffset(video?.manualOffsetSeconds)),
+    });
+  }, [loadReviewSession, setForm, setStatus]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const url = new URL(window.location.href);
+    const currentToken = url.searchParams.get("session");
+    if (shareSessionToken) {
+      if (currentToken === shareSessionToken) {
+        return;
+      }
+      url.searchParams.set("session", shareSessionToken);
+    } else if (currentToken) {
+      url.searchParams.delete("session");
+    } else {
+      return;
+    }
+    const next = `${url.pathname}${url.search}${url.hash}`;
+    window.history.replaceState({}, "", next);
+  }, [shareSessionToken]);
 
   const handleJump = (seconds: number) => {
     if (!videoOptions.length) {
@@ -274,6 +416,42 @@ function App() {
     setLoading(false);
     setCurrentVideoTime(0);
   };
+
+  const handleCopyShareLink = useCallback(async () => {
+    if (!shareSessionUrl) {
+      setStatus({
+        kind: "error",
+        message: "Load a report before creating a share link.",
+      });
+      return;
+    }
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(shareSessionUrl);
+        setStatus({
+          kind: "success",
+          message: "Copied share link to clipboard.",
+        });
+      } else if (typeof window !== "undefined") {
+        window.prompt("Share this session link:", shareSessionUrl);
+        setStatus({
+          kind: "success",
+          message: "Share link ready to copy.",
+        });
+      } else {
+        setStatus({
+          kind: "error",
+          message: "Clipboard not available in this environment.",
+        });
+      }
+    } catch (error) {
+      console.error("[logtime] Failed to copy share link", error);
+      setStatus({
+        kind: "error",
+        message: "Failed to create share link.",
+      });
+    }
+  }, [setStatus, shareSessionUrl]);
 
   const handleManualOffsetChange = (newOffset: number) => {
     if (!Number.isFinite(newOffset)) {
@@ -361,6 +539,13 @@ function App() {
                       <span className="text-xs text-emerald-400">{status.message}</span>
                     ) : null}
                   </div>
+                  <button
+                    type="button"
+                    onClick={handleCopyShareLink}
+                    className="rounded-full border border-slate-700 px-5 py-2 text-sm font-semibold text-slate-200 transition hover:bg-slate-900"
+                  >
+                    Copy share link
+                  </button>
                   {!!timestampList.length && (
                     <button
                       type="button"
@@ -1146,6 +1331,19 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function sanitizeManualOffset(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return 0;
+}
+
 async function autoFillYoutubeFirstPulls(
   videos: VideoFormEntry[],
   fights: RawFight[],
@@ -1291,4 +1489,75 @@ function getOptionClassColor(
   const className = classMap[key];
   if (!className) return null;
   return getClassColor(className);
+}
+
+function encodeSharedSessionPayload(payload: SharedSessionPayload): string {
+  return base64Encode(JSON.stringify(payload));
+}
+
+function decodeSharedSessionPayload(token: string): SharedSessionPayload | null {
+  try {
+    const json = base64Decode(token);
+    const parsed = JSON.parse(json);
+    if (isSharedSessionPayload(parsed)) {
+      return parsed;
+    }
+    return null;
+  } catch (error) {
+    console.warn("[logtime] Failed to decode shared session payload", error);
+    return null;
+  }
+}
+
+function isSharedSessionPayload(input: unknown): input is SharedSessionPayload {
+  if (!input || typeof input !== "object") {
+    return false;
+  }
+  const payload = input as Partial<SharedSessionPayload>;
+  if (payload.version !== 1) {
+    return false;
+  }
+  if (typeof payload.reportId !== "string" || !payload.reportId.trim()) {
+    return false;
+  }
+  if (!Array.isArray(payload.videos) || payload.videos.length === 0) {
+    return false;
+  }
+  return true;
+}
+
+function buildShareableSessionUrl(token: string): string {
+  if (typeof window === "undefined") {
+    return `?session=${encodeURIComponent(token)}`;
+  }
+  const url = new URL(window.location.href);
+  url.searchParams.set("session", token);
+  return url.toString();
+}
+
+function base64Encode(value: string): string {
+  if (typeof globalThis === "undefined" || typeof globalThis.btoa !== "function") {
+    throw new Error("Base64 encoding not supported.");
+  }
+  if (typeof TextEncoder !== "undefined") {
+    const bytes = new TextEncoder().encode(value);
+    let binary = "";
+    bytes.forEach((byte) => {
+      binary += String.fromCharCode(byte);
+    });
+    return globalThis.btoa(binary);
+  }
+  return globalThis.btoa(unescape(encodeURIComponent(value)));
+}
+
+function base64Decode(value: string): string {
+  if (typeof globalThis === "undefined" || typeof globalThis.atob !== "function") {
+    throw new Error("Base64 decoding not supported.");
+  }
+  const binary = globalThis.atob(value);
+  if (typeof TextDecoder !== "undefined") {
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  }
+  return decodeURIComponent(escape(binary));
 }

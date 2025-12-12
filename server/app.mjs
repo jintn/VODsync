@@ -48,6 +48,14 @@ const allowedOriginSet = new Set(
     .filter((origin) => origin.length > 0),
 );
 const allowAllOrigins = allowedOriginSet.size === 0;
+const devOriginPrefixes = [
+  "http://localhost",
+  "https://localhost",
+  "http://127.0.0.1",
+  "https://127.0.0.1",
+  "http://[::1]",
+  "https://[::1]",
+];
 
 async function getAccessToken() {
   const now = Date.now();
@@ -1118,7 +1126,14 @@ function isOriginAllowed(origin) {
   if (allowAllOrigins) {
     return true;
   }
-  return allowedOriginSet.has(origin);
+  if (allowedOriginSet.has(origin)) {
+    return true;
+  }
+  const lower = origin.toLowerCase();
+  if (devOriginPrefixes.some((prefix) => lower.startsWith(prefix))) {
+    return true;
+  }
+  return false;
 }
 
 function setCorsHeaders(res, origin) {
